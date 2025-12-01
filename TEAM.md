@@ -1,18 +1,18 @@
 # Team Information
 
-**Course:** _[fill your course code and name]_
+**Course:** _ Autonomous Systems
 
-**Semester:** Semester 2, 2020
+**Semester:** Semester 1, 2025
 
-**Instructor:** _[name of your instructor]_
+**Instructor:** _Anders Jonsson_
 
-**Team name:** _[replace this with team name in plan text]_
+**Team name:** _[Angela-Dimi]_
 
 **Team members:**
 
-* Student 1's Student number - Full Name - Student email - Student Github id
-* Student 2's Student number - Full Name - Student email - Student Github id
-* Student 3's Student number - Full Name - Student email - Student Github id
+268856 - Dimitrije Janjušević - dimitrijealeksandar.janjusevic01@estudiant.upf.edu - Student Github id
+268611 - Angela Petkova  - angelastefanova.petkova01@estudiant.upf.edu - Student Github id
+
 
 Replace the lines above with the correct details of members. Delete or add lines as needed.
 
