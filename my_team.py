@@ -1,25 +1,3 @@
-# baselineTeam.py
-# ---------------
-# Licensing Information:  You are free to use or extend these projects for
-# educational purposes provided that (1) you do not distribute or publish
-# solutions, (2) you retain this notice, and (3) you provide clear
-# attribution to UC Berkeley, including a link to http://ai.berkeley.edu.
-#
-# Attribution Information: The Pacman AI projects were developed at UC Berkeley.
-# The core projects and autograders were primarily created by John DeNero
-# (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu).
-# Student side autograding was added by Brad Miller, Nick Hay, and
-# Pieter Abbeel (pabbeel@cs.berkeley.edu).
-
-
-# baselineTeam.py
-# ---------------
-# Licensing Information: Please do not distribute or publish solutions to this
-# project. You are free to use and extend these projects for educational
-# purposes. The Pacman AI projects were developed at UC Berkeley, primarily by
-# John DeNero (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu).
-# For more info, see http://inst.eecs.berkeley.edu/~cs188/sp09/pacman.html
-
 import random
 import contest.util as util
 
@@ -250,7 +228,7 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
             next_min_distance_to_ghost = min([self.get_maze_distance(next_pos, next_ghost.get_position()) for next_ghost in next_ghosts])
             features['ghost_distance'] = next_min_distance_to_ghost
 
-        # All invaders 
+        # All invaders
         next_invaders = [next_enemy for next_enemy in next_enemies if next_enemy.is_pacman and next_enemy.get_position() is not None]
 
         # Compute the distance to the closest pacman enemy we can see for the successor
@@ -514,151 +492,346 @@ class OffensiveReflexAgent(ReflexCaptureAgent):
 
 
 class DefensiveReflexAgent(ReflexCaptureAgent):
-    """
-  A reflex agent that attacks with different cases.
-    """
+
+    def __init__(self, index, time_for_computing=.1):
+        super().__init__(index, time_for_computing)
+        # initialize key variables for the agent's state
+        self.start = None
+        self.midWidth = None
+        self.height = None
+        self.width = None
+        # list of important points to defend (food, capsules, choke points)
+        self.defensive_targets = []
+        # list of points for the agent to patrol when no invader is visible
+        self.patrol_points = []
+        # index to track the current patrol point
+        self.patrol_index = 0
+        # dictionary to store historical invader positions for prediction
+        self.last_invader_positions = {}
+        # location of the last piece of food eaten by an invader
+        self.position_food_eaten = None
+        # time when the last piece of food was eaten
+        self.last_eaten_food_time = 0
+        # timer for how long to retreat after being scared
+        self.scared_retreat_timer = 0
+
+    def register_initial_state(self, game_state):
+        # call base class registration
+        super().register_initial_state(game_state)
+        # set up map dimensions
+        self.midWidth = game_state.data.layout.width / 2
+        self.height = game_state.data.layout.height
+        self.width = game_state.data.layout.width
+        self.start = game_state.get_agent_position(self.index)
+
+        # set up defensive points and patrol route
+        self.initialize_defensive_setup(game_state)
+
+    def initialize_defensive_setup(self, game_state):
+        # get initial food and capsules to defend
+        our_food = self.get_food_you_are_defending(game_state).as_list()
+        our_capsules = self.get_capsules_you_are_defending(game_state)
+
+        # identify the most critical points (e.g., near capsules or entrances)
+        self.defensive_targets = self.identify_critical_points(game_state, our_food, our_capsules)
+
+        # create a route for the agent to follow when idle
+        self.patrol_points = self.create_patrol_route(game_state, our_food, our_capsules)
+
+        # if only 2 or less food left, just defend those spots
+        if len(our_food) <= 2:
+            self.defensive_targets = our_food
+
+    def identify_critical_points(self, game_state, food_list, capsules):
+        # defines a list of high-priority locations to defend based on proximity to capsules,
+        # spawn points, and choke points (border locations with few exits)
+        critical_points = []
+
+        # capsules are critical
+        critical_points.extend(capsules)
+
+        # if little food is left, defend the remaining food
+        if len(food_list) <= 4:
+            critical_points.extend(food_list[:2])
+
+        # food near a capsule is critical
+        for food in food_list:
+            for capsule in capsules:
+                if self.get_maze_distance(food, capsule) < 4:
+                    critical_points.append(food)
+                    break
+
+        # food near enemy spawn points (potential entry points) is critical
+        spawn_points = self.get_spawn_points(game_state)
+        for food in food_list:
+            for spawn in spawn_points:
+                if self.get_maze_distance(food, spawn) < 5:
+                    critical_points.append(food)
+                    break
+
+        # identify choke points on the border
+        border_x = int(self.midWidth - 1) if self.red else int(self.midWidth + 1)
+        for y in range(1, self.height - 1):
+            pos = (border_x, y)
+            if not is_wall(game_state, pos):
+                exits = 0
+                # count exits from this border tile
+                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                    nx, ny = border_x + dx, y + dy
+                    if 0 <= nx < self.width and 0 <= ny < self.height and not is_wall(game_state, (nx, ny)):
+                        exits += 1
+                # if 2 or fewer non-wall exits, it's a choke point
+                if exits <= 2:
+                    critical_points.append(pos)
+
+        # return unique critical points
+        return list(set(critical_points))
+
+    def get_spawn_points(self, game_state):
+        # collects the starting positions of all agents in the game
+        spawns = []
+        for i in range(game_state.get_num_agents()):
+            spawn = game_state.get_initial_agent_position(i)
+            if spawn:
+                spawns.append(spawn)
+        return spawns
+
+    def create_patrol_route(self, game_state, food_list, capsules):
+        # creates a sequential route of points to visit when the agent is not chasing an invader
+        patrol = []
+
+        # patrol the capsules
+        patrol.extend(capsules)
+
+        # patrol the identified critical points
+        patrol.extend(self.defensive_targets)
+
+        # include key border points (middle, top, bottom quarters)
+        border_x = int(self.midWidth - 1) if self.red else int(self.midWidth + 1)
+        patrol.append((border_x, self.height // 2))
+        patrol.append((border_x, self.height // 4))
+        patrol.append((border_x, 3 * self.height // 4))
+
+        # ensure patrol points are unique and limit the list size
+        seen = set()
+        unique_patrol = []
+        for point in patrol:
+            if point not in seen:
+                seen.add(point)
+                unique_patrol.append(point)
+
+        return unique_patrol[:10] # use up to 10 unique points
 
     def get_features(self, game_state, action):
+        # calculates features for the successor state that will be used to determine the best action
+
         features = util.Counter()
-        previous_game_state = self.get_previous_observation()
+        # successor state after performing the action
         successor = self.get_successor(game_state, action)
-        height_maze = self.height
-        width_maze = self.width
 
         current_state = game_state.get_agent_state(self.index)
         current_pos = current_state.get_position()
         next_state = successor.get_agent_state(self.index)
         next_pos = next_state.get_position()
-        current_food_list = self.get_food_you_are_defending(game_state).as_list()
 
-        # Compute the current distance to pacman invaders we can see
-        current_enemies = [game_state.get_agent_state(i) for i in self.get_opponents(game_state)]
-        current_total_invaders = [a for a in current_enemies if a.is_pacman]
-
-        # Compute position of last eaten food
-        if not previous_game_state is None:
-            previous_food = self.get_food_you_are_defending(previous_game_state).as_list()
-            if len(previous_food) > len(current_food_list):
-                for food in previous_food:
-                    if not food in current_food_list:
-                        self.position_food_eaten = food
-
-        # Compute current distance to border
-        current_distance_border = self.min_distance_to_home(game_state, current_pos)
-
-        # Computes whether the successor is on defense (1) or offense (0)
-        features['on_defense'] = 1
-        features['do_not_attack'] = 0
-        if next_state.is_pacman:
-            features['on_defense'] = 0
-            features['do_not_attack'] = 1
-
-        # Computes distance to pacman invaders we can see for the successor
+        # identify enemies, invaders (pacmen in our territory), and scared enemies
         enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
-        invaders = [a for a in enemies if a.is_pacman and a.get_position() is not None]
+        invaders = [e for e in enemies if e.is_pacman and e.get_position() is not None]
+        scared_enemies = [e for e in enemies if e.scared_timer > 0 and e.get_position() is not None]
+
+        # food and capsules the agent is defending
+        our_food = self.get_food_you_are_defending(successor).as_list()
+        our_capsules = self.get_capsules_you_are_defending(successor)
+
+        # --- invader features ---
+        # count of invaders
         features['num_invaders'] = len(invaders)
-        if len(invaders) > 0:
-            dists = [self.get_maze_distance(next_pos, a.get_position()) for a in invaders]
-            features['invader_distance'] = min(dists)
+        if invaders:
+            # distance to the closest invader
+            invader_positions = [invader.get_position() for invader in invaders]
+            closest_invader = min(invader_positions,
+                                  key=lambda pos: self.get_maze_distance(next_pos, pos))
 
-        # Computes whether the action is STOP
-        if action == Directions.STOP: features['stop'] = 1
-        # Computes whether the action is REVERSE
-        rev = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
-        if action == rev: features['reverse'] = 1
+            features['invader_distance'] = self.get_maze_distance(next_pos, closest_invader)
 
-        # Compute distance to last eaten food for the successor
-        if not self.position_food_eaten is None:
-            features['distance_to_last_food_eaten'] = self.get_maze_distance(next_pos, self.position_food_eaten)
+            # try to predict the invader's next position based on last few moves
+            if closest_invader in self.last_invader_positions:
+                last_pos = self.last_invader_positions[closest_invader]
+                if len(last_pos) >= 2:
+                    dx = last_pos[-1][0] - last_pos[-2][0]
+                    dy = last_pos[-1][1] - last_pos[-2][1]
+                    predicted = (closest_invader[0] + dx, closest_invader[1] + dy)
+                    if not is_wall(game_state, predicted):
+                        # distance to the predicted interception point
+                        features['predicted_intercept'] = self.get_maze_distance(next_pos, predicted)
 
-        # Computes the distance to the closest border: top or bottom, and the x middle and y middle
-        top_border = height_maze
-        bottom_border = 0
-        distance_to_closest_border = 0
-        distance_to_top_border = abs(current_pos[1] - top_border)
-        distance_to_bottom_border = abs(current_pos[1] - bottom_border)
-        # Check if current position is closer to the top or bottom border
-        if distance_to_top_border < distance_to_bottom_border:
-            distance_to_closest_border = distance_to_top_border
-        else:
-            distance_to_closest_border = distance_to_bottom_border
-        features['distance_to_closest_border'] = distance_to_closest_border
+            # update historical invader positions
+            if closest_invader not in self.last_invader_positions:
+                self.last_invader_positions[closest_invader] = []
+            self.last_invader_positions[closest_invader].append(closest_invader)
+            if len(self.last_invader_positions[closest_invader]) > 5:
+                self.last_invader_positions[closest_invader].pop(0)
 
-        # Compute successor distance to x middle
-        x_middle = width_maze / 2
-        distance_to_x_middle = abs(next_pos[0] - x_middle)
-        features['distance_to_x_middle'] = distance_to_x_middle
-        # Compute successor distance to y middle
-        y_middle = height_maze / 2
-        distance_to_y_middle = abs(current_pos[1] - y_middle)
-        features['distance_to_y_middle'] = distance_to_y_middle
+            # check if any invader is carrying food
+            carrying_invaders = [invader for invader in invaders if invader.num_carrying > 0]
+            if carrying_invaders:
+                features['invader_with_food'] = 1
 
-        # Compute successor distance to border
-        features['distance_to_border'] = self.min_distance_to_home(game_state, next_pos)
+        # --- capsule defense features ---
+        if our_capsules:
+            # distance to the closest capsule we are defending
+            capsule_distances = [self.get_maze_distance(next_pos, capsule) for capsule in our_capsules]
+            features['capsule_distance'] = min(capsule_distances)
 
-        # Compute current distance to x middle
-        current_distance_to_x_middle = abs(current_pos[0] - x_middle)
+            # check if a capsule is under threat from any enemy
+            capsule_at_risk = False
+            for capsule in our_capsules:
+                for enemy in enemies:
+                    if enemy.get_position():
+                        dist = self.get_maze_distance(capsule, enemy.get_position())
+                        if dist < 8:
+                            capsule_at_risk = True
+                            break
+                if capsule_at_risk:
+                    break
+            if capsule_at_risk:
+                features['capsule_at_risk'] = 1
 
-        """Different cases"""
+        # --- food defense features ---
+        if our_food:
+            # distance to the closest food we are defending
+            closest_food = min(our_food, key=lambda f: self.get_maze_distance(next_pos, f))
+            features['food_distance'] = self.get_maze_distance(next_pos, closest_food)
 
-        # If the agent is scared, go to the border.
+            # special features if only 2 or less food left
+            if len(our_food) <= 2:
+                features['last_food_defense'] = 1
+                features['last_food_distance'] = features['food_distance']
+
+            # check if food is under threat from an invader
+            food_at_risk = False
+            for food in our_food:
+                for invader in invaders:
+                    dist = self.get_maze_distance(food, invader.get_position())
+                    if dist < 6:
+                        food_at_risk = True
+                        break
+                if food_at_risk:
+                    break
+            if food_at_risk:
+                features['food_at_risk'] = 1
+
+        # --- patrol features (used when no invaders are visible) ---
+        if self.patrol_points and not invaders:
+            # distance to the current patrol target
+            target_patrol = self.patrol_points[self.patrol_index % len(self.patrol_points)]
+            features['patrol_distance'] = self.get_maze_distance(next_pos, target_patrol)
+
+            # advance to the next patrol point once the current one is reached
+            if self.get_maze_distance(current_pos, target_patrol) < 2:
+                self.patrol_index += 1
+
+        # --- scared/retreat features ---
         if current_state.scared_timer > 0:
-            features['on_defense']
-            features['do_not_attack']
-            features['stop']
-            features['distance_to_last_food_eaten'] = 0
-            features['distance_to_closest_border'] = 0
-            features['distance_to_capsule'] = 0
-            features['distance_to_x_middle']
-            features['distance_to_y_middle']
-            features['reverse']
-            features['invader_distance'] = features['invader_distance'] * -1
-            features['num_invaders'] = 0
-            if current_distance_border < 6:
-                features['distance_to_border'] = 0
+            # agent is scared
+            features['scared'] = 1
+            self.scared_retreat_timer = 5 # start retreat timer
 
-        # If there is an invader, eat it.
-        elif len(current_total_invaders) > 0:
-            features['on_defense']
-            features['do_not_attack']
-            features['stop']
-            features['distance_to_last_food_eaten']
-            features['distance_to_closest_border'] = 0
-            features['distance_to_capsule'] = 0
-            features['distance_to_x_middle'] = 0
-            features['distance_to_y_middle'] = 0
-            features['reverse'] = 0
-            features['invader_distance']
-            features['num_invaders']
-            features['distance_to_border'] = 0
+            # distance to the border (home) for retreat
+            features['distance_to_border'] = self.min_distance_to_home(successor, next_pos)
 
-        # If no invader or scared: patrol
-        else:
-            # If agent is in the middle, patrol vertically
-            if current_distance_to_x_middle <= 3:
-                features['distance_to_y_middle']
-                features['distance_to_x_middle'] = 0
-                features['distance_to_closest_border']
-            else:
-                features['distance_to_x_middle']
-                features['distance_to_y_middle'] = 0
-                features['distance_to_closest_border'] = 0
-            features['stop']
-            features['distance_to_last_food_eaten'] = 0
-            features['reverse']
-            features['invader_distance'] = 0
-            features['on_defense']
-            features['do_not_attack']
-            features['num_invaders'] = 0
-            if current_distance_border < 6:
-                features['distance_to_border'] = 0
+            # if a scared enemy is nearby, moving away is preferred (negative feature value)
+            if scared_enemies:
+                closest_scared = min(scared_enemies,
+                                     key=lambda e: self.get_maze_distance(next_pos, e.get_position()))
+                if self.get_maze_distance(next_pos, closest_scared.get_position()) < 3:
+                    features['scared_enemy_nearby'] = -5
+
+        # agent is recovering after being scared
+        elif self.scared_retreat_timer > 0:
+            features['scared_recovery'] = 1
+            self.scared_retreat_timer -= 1
+            # continue moving towards border
+            features['distance_to_border'] = self.min_distance_to_home(successor, next_pos)
+
+        # --- last eaten food tracking ---
+        previous_game_state = self.get_previous_observation()
+        if previous_game_state and not self.position_food_eaten:
+            # check if food was just eaten in the previous step
+            previous_food = self.get_food_you_are_defending(previous_game_state).as_list()
+            if len(previous_food) > len(our_food):
+                for food in previous_food:
+                    if food not in our_food:
+                        self.position_food_eaten = food
+                        self.last_eaten_food_time = game_state.data.timeleft
+                        break
+
+        # if food was recently eaten, move towards that position
+        if self.position_food_eaten:
+            time_since_eaten = self.last_eaten_food_time - game_state.data.timeleft
+            if time_since_eaten < 30: # only for 30 game steps
+                features['last_eaten_food_distance'] = self.get_maze_distance(next_pos, self.position_food_eaten)
+
+        # --- general action features ---
+        # is the agent on defense (not a pacman)
+        features['on_defense'] = 1 if not next_state.is_pacman else 0
+        # discourage stopping
+        if action == Directions.STOP:
+            features['stop'] = 1
+        # discourage reversing direction
+        rev = Directions.REVERSE[current_state.configuration.direction]
+        if action == rev:
+            features['reverse'] = 1
+
+        # --- teamwork/border features ---
+        teammate_index = 1 if self.index == 0 else 0
+        teammate_state = successor.get_agent_state(teammate_index)
+        if teammate_state.get_position():
+            teammate_pos = teammate_state.get_position()
+
+            # check if the teammate is closer to the single invader
+            if invaders and len(invaders) == 1:
+                invader_pos = invaders[0].get_position()
+                my_dist_to_invader = self.get_maze_distance(next_pos, invader_pos)
+                teammate_dist_to_invader = self.get_maze_distance(teammate_pos, invader_pos)
+
+                # if teammate is significantly closer, this agent might back off (positive feature)
+                if teammate_dist_to_invader < my_dist_to_invader - 2:
+                    features['teammate_better_position'] = 1
+
+        # optimal distance from the border
+        border_dist = self.min_distance_to_home(successor, next_pos)
+        if 1 < border_dist < 10:
+            features['good_border_distance'] = 1
+        # penalize being too far from the border
+        elif border_dist >= 10:
+            features['too_far_from_border'] = border_dist
 
         return features
 
     def get_weights(self, game_state, action):
-        return {'num_invaders': -1000, 'on_defense': 100, 'invader_distance': -10, 'stop': -100, 'reverse': -2,
-                'distance_to_y_middle': -0.7, 'distance_to_x_middle': -1.2, 'distance_to_closest_border': -0.7,
-                'distance_to_last_food_eaten': -8, 'distance_to_border': -1, 'do_not_attack': -10000}
+        # defines the importance (weights) for each feature.
+        # these weights are fixed and determine the agent's behavior strategy.
+
+        return {'num_invaders': 1000, 'invader_distance': -10, 'invader_with_food': 100,
+                'capsule_distance': -5, 'capsule_at_risk': 50,
+                'food_distance': -1, 'last_food_defense': 500, 'last_food_distance': -10,
+                'food_at_risk': 100,
+                'patrol_distance': -2,
+                'scared': -100, 'scared_enemy_nearby': 100, 'scared_recovery': -10,
+                'distance_to_border': -5,
+                'last_eaten_food_distance': -20,
+                'on_defense': 100, 'stop': -10, 'reverse': -2,
+                'predicted_intercept': -15,
+                'teammate_better_position': -50,
+                'good_border_distance': 1, 'too_far_from_border': -5,
+                }
+
+    def choose_action(self, game_state):
+        if game_state.data.timeleft % 50 == 0:
+            self.last_invader_positions.clear()
+
+        return super().choose_action(game_state)
 
 
 class two_ways:
